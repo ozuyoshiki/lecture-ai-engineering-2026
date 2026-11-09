@@ -9,9 +9,9 @@ from pydantic_ai import DeferredToolRequests
 from pydantic_ai.messages import ToolCallPart, ToolReturnPart
 from pydantic_ai.models.test import TestModel
 
-from app.agent import agent
+from app.agent import agent, run_with_approvals
 
-BASE_TOOLS = {"search_glossary", "get_lecture_summary"}
+BASE_TOOLS = {"search_glossary", "get_lecture_summary", "make_quiz", "save_learning_log"}
 
 
 def _parts(result, kind):
@@ -40,3 +40,44 @@ def test_glossary_result_reaches_the_model():
         result = agent.run_sync("RAGとは？")
     returns = _parts(result, ToolReturnPart)
     assert returns and returns[0].tool_name == "search_glossary"
+
+
+def test_save_learning_log_waits_for_approval(tmp_path, monkeypatch):
+    from app import tools
+
+    monkeypatch.setattr(tools, "LEARNING_LOG_DIR", tmp_path)
+    model = TestModel(call_tools=["save_learning_log"])
+    with agent.override(model=model):
+        result = agent.run_sync("今日の学習記録を保存して")
+
+    assert isinstance(result.output, DeferredToolRequests)
+    assert len(result.output.approvals) == 1
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_declining_save_learning_log_does_not_write_file(tmp_path, monkeypatch):
+    from app import tools
+
+    monkeypatch.setattr(tools, "LEARNING_LOG_DIR", tmp_path)
+    monkeypatch.setattr("builtins.input", lambda _: "n")
+    model = TestModel(call_tools=["save_learning_log"])
+    with agent.override(model=model):
+        result = run_with_approvals(agent, "今日の学習記録を保存して", model)
+
+    assert not isinstance(result.output, DeferredToolRequests)
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_approving_save_learning_log_writes_file(tmp_path, monkeypatch):
+    from app import tools
+
+    monkeypatch.setattr(tools, "LEARNING_LOG_DIR", tmp_path)
+    monkeypatch.setattr("builtins.input", lambda _: "y")
+    model = TestModel(call_tools=["save_learning_log"])
+    with agent.override(model=model):
+        result = run_with_approvals(agent, "今日の学習記録を保存して", model)
+
+    assert not isinstance(result.output, DeferredToolRequests)
+    log_files = list(tmp_path.glob("*.md"))
+    assert len(log_files) == 1
+    assert log_files[0].read_text(encoding="utf-8").strip()
